@@ -45,6 +45,11 @@ use crate::{
     surfnet::{GeyserEvent, PluginCommand, locker::SurfnetSvmLocker, remote::SurfnetRemoteClient},
 };
 
+mod tpu;
+use tokio_util::sync::CancellationToken;
+
+use tpu::start_tpu_ingest_runloop;
+
 const BLOCKHASH_SLOT_TTL: u64 = 75;
 
 /// A loaded geyser plugin with all metadata needed for lifecycle management.
@@ -887,11 +892,22 @@ async fn start_rpc_servers_runloop(
     let (rpc_handle, rpc_close_handle) =
         start_http_rpc_server_runloop(config, middleware.clone(), simnet_events_tx.clone()).await?;
     let (ws_handle, ws_close_handle) =
-        start_ws_rpc_server_runloop(config, middleware, simnet_events_tx).await?;
+        start_ws_rpc_server_runloop(config, middleware, simnet_events_tx.clone()).await?;
+
+    let tpu_cancel = CancellationToken::new();
+    if let Err(e) = start_tpu_ingest_runloop(
+        &config.rpc,
+        simnet_commands_tx.clone(),
+        simnet_events_tx.clone(),
+        tpu_cancel.clone(),
+    ) {
+        let _ = simnet_events_tx.send(SimnetEvent::error(format!("TPU ingest disabled: {e}")));
+    }
 
     let shutdown_rpc_servers: Box<dyn FnOnce() + Send> = Box::new(move || {
         rpc_close_handle.close();
         ws_close_handle.close();
+        tpu_cancel.cancel();
     });
 
     Ok((rpc_handle, ws_handle, shutdown_rpc_servers))

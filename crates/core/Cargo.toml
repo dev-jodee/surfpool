@@ -67,6 +67,7 @@ solana-loader-v3-interface = { workspace = true }
 solana-message = { workspace = true }
 solana-nonce = { workspace = true }
 solana-packet = { workspace = true }
+solana-perf = { workspace = true }
 solana-program-option = { workspace = true }
 solana-program-pack = { workspace = true }
 solana-pubkey = { workspace = true }
@@ -77,6 +78,7 @@ solana-sdk-ids = { workspace = true }
 solana-signature = { workspace = true, features = ["rand"] }
 solana-signer = { workspace = true }
 solana-slot-hashes = { workspace = true }
+solana-streamer = { workspace = true }
 solana-system-interface = { workspace = true }
 solana-sysvar = { workspace = true }
 solana-sysvar-id = { workspace = true }
@@ -90,6 +92,7 @@ spl-token-interface = { workspace = true }
 spl-token-2022-interface = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 uuid = { workspace = true }
 
 surfpool-db = { workspace = true }
