@@ -117,6 +117,7 @@ env_logger = "0.11"
 solana-ed25519-program = { workspace = true }
 solana-secp256k1-program = { version = "3.0", default-features = false, features = ["bincode"] }
 solana-secp256r1-program = "3.0"
+solana-streamer = { workspace = true, features = ["dev-context-only-utils"] }
 tempfile = { workspace = true }
 spl-token-metadata-interface = { workspace = true }
 

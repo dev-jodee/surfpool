@@ -43,6 +43,7 @@ use solana_secp256k1_program::{
 };
 use solana_secp256r1_program::new_secp256r1_instruction_with_signature;
 use solana_signer::Signer;
+use solana_streamer::nonblocking::testing_utilities::make_client_endpoint;
 use solana_system_interface::{
     instruction as system_instruction, instruction::transfer, program as system_program,
 };
@@ -360,6 +361,121 @@ async fn test_simnet_some_sol_transfers(test_type: TestType) {
             }
         }), // TODO: compute fee
         "Some transfers failed"
+    );
+}
+
+#[cfg_attr(feature = "ignore_tests_ci", ignore = "flaky CI tests")]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_tpu_quic_ingest_lands_transaction() {
+    let sender = Keypair::new();
+    let recipient = Keypair::new().pubkey();
+    let airdrop_token_amount = LAMPORTS_PER_SOL;
+    let transfer_amount = LAMPORTS_PER_SOL / 2;
+
+    let bind_host = "127.0.0.1";
+    let bind_port = get_free_port().unwrap();
+    let ws_port = get_free_port().unwrap();
+    let tpu_quic_port = get_free_port().unwrap();
+    let config = SurfpoolConfig {
+        simnets: vec![SimnetConfig {
+            slot_time: 1,
+            airdrop_addresses: vec![sender.pubkey()],
+            airdrop_token_amount,
+            ..SimnetConfig::default()
+        }],
+        rpc: RpcConfig {
+            bind_host: bind_host.to_string(),
+            bind_port,
+            ws_port,
+            tpu_quic_port,
+            ..Default::default()
+        },
+        ..SurfpoolConfig::default()
+    };
+
+    let (surfnet_svm, simnet_events_rx, geyser_events_rx) = TestType::no_db().initialize_svm();
+    let (simnet_commands_tx, simnet_commands_rx) = unbounded();
+    let svm_locker = SurfnetSvmLocker::new(surfnet_svm);
+
+    let _handle = hiro_system_kit::thread_named("test").spawn(move || {
+        let future = start_local_surfnet_runloop(
+            svm_locker,
+            config,
+            simnet_commands_tx,
+            simnet_commands_rx,
+            geyser_events_rx,
+        );
+        if let Err(e) = hiro_system_kit::nestable_block_on(future) {
+            panic!("{e:?}");
+        }
+    });
+
+    wait_for_ready_and_connected(&simnet_events_rx);
+
+    let minimal_client =
+        http::connect::<MinimalClient>(format!("http://{bind_host}:{bind_port}").as_str())
+            .await
+            .expect("Failed to connect to Surfpool");
+    let full_client =
+        http::connect::<FullClient>(format!("http://{bind_host}:{bind_port}").as_str())
+            .await
+            .expect("Failed to connect to Surfpool");
+
+    let recent_blockhash = full_client
+        .get_latest_blockhash(None)
+        .await
+        .map(|r| Hash::from_str(r.value.blockhash.as_str()).expect("Failed to parse blockhash"))
+        .expect("Failed to get blockhash");
+
+    let message = Message::new_with_blockhash(
+        &[system_instruction::transfer(
+            &sender.pubkey(),
+            &recipient,
+            transfer_amount,
+        )],
+        Some(&sender.pubkey()),
+        &recent_blockhash,
+    );
+    let transaction =
+        VersionedTransaction::try_new(VersionedMessage::Legacy(message), &[sender.insecure_clone()])
+            .expect("Failed to sign transaction");
+    let wire_transaction = bincode::serialize(&transaction).expect("Failed to serialize");
+
+    // Send straight to the advertised QUIC TPU port, exactly as a TpuClient (the
+    // Anchor deployer) would — never touching the sendTransaction RPC.
+    let tpu_addr: std::net::SocketAddr = format!("{bind_host}:{tpu_quic_port}")
+        .parse()
+        .expect("Failed to parse TPU address");
+    let connection = tokio::time::timeout(
+        Duration::from_secs(30),
+        make_client_endpoint(&tpu_addr, None),
+    )
+    .await
+    .expect("Timed out connecting to the QUIC TPU port");
+    let mut stream = connection.open_uni().await.expect("Failed to open uni stream");
+    stream
+        .write_all(&wire_transaction)
+        .await
+        .expect("Failed to write transaction");
+    stream.finish().expect("Failed to finish stream");
+
+    let mut landed = false;
+    for _ in 0..50 {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let balance = minimal_client
+            .get_balance(recipient.to_string(), None)
+            .await
+            .expect("Failed to fetch balance")
+            .value;
+        if balance == transfer_amount {
+            landed = true;
+            break;
+        }
+    }
+    drop(connection);
+    assert!(
+        landed,
+        "transaction sent over QUIC TPU did not land in the SVM"
     );
 }
 
