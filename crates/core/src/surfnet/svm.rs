@@ -757,9 +757,12 @@ impl SurfnetSvm {
             streamed_accounts: OverlayStorage::wrap(self.streamed_accounts.clone_box()),
             scheduled_overrides: OverlayStorage::wrap(self.scheduled_overrides.clone_box()),
 
+            // Only the runloop drains these, against the live VM. Cloning them would make
+            // `commit_sandbox` push back a duplicate of every in-flight transaction.
+            transactions_queued_for_confirmation: VecDeque::new(),
+            transactions_queued_for_finalization: VecDeque::new(),
+
             // Clone non-storage fields normally
-            transactions_queued_for_confirmation: self.transactions_queued_for_confirmation.clone(),
-            transactions_queued_for_finalization: self.transactions_queued_for_finalization.clone(),
             perf_samples: self.perf_samples.clone(),
             transactions_processed: self.transactions_processed,
             latest_epoch_info: self.latest_epoch_info.clone(),
@@ -7771,6 +7774,42 @@ mod tests {
             read(ALLOWED_OFFSET),
             5_678,
             "the second override must apply"
+        );
+    }
+
+    /// Sandboxes used to inherit a copy of the live confirmation and finalization queues,
+    /// so `commit_sandbox` pushed back a duplicate of every transaction in flight when the
+    /// bundle started, promoting each one twice.
+    #[test]
+    fn test_commit_sandbox_does_not_duplicate_pending_promotions() {
+        let (mut svm, _events_rx, _geyser_rx) = TestType::no_db().initialize_svm();
+
+        let inflight = VersionedTransaction {
+            signatures: vec![Signature::default()],
+            message: solana_message::VersionedMessage::Legacy(solana_message::Message::default()),
+        };
+        let (inflight_status_tx, _inflight_rx) = crossbeam_channel::unbounded();
+        svm.transactions_queued_for_confirmation.push_back((
+            inflight.clone(),
+            inflight_status_tx.clone(),
+            None,
+        ));
+        svm.transactions_queued_for_finalization
+            .push_back((0, inflight, inflight_status_tx, None));
+
+        let sandbox = svm.clone_for_bundle_sandbox();
+        let (bundle_status_tx, _rx) = crossbeam_channel::unbounded();
+        svm.commit_sandbox(sandbox, bundle_status_tx).unwrap();
+
+        assert_eq!(
+            svm.transactions_queued_for_confirmation.len(),
+            1,
+            "bundle commit duplicated a transaction already awaiting confirmation"
+        );
+        assert_eq!(
+            svm.transactions_queued_for_finalization.len(),
+            1,
+            "bundle commit duplicated a transaction already awaiting finalization"
         );
     }
 }
